@@ -166,12 +166,12 @@
     <div class="card">
       <div class="kv"><span>当前版本</span><span id="uVersion">—</span></div>
       <div class="field" style="margin-top:8px">
-        <label class="f">更新包地址（http/https 直链，例如阿里云 OSS）</label>
-        <input id="sUpdateUrl" placeholder="https://xxx.oss-cn-beijing.aliyuncs.com/kebiao/kebiao.apk">
+        <label class="f">更新包地址（http/https 直链，GitHub 加速代理或 OSS 都行）</label>
+        <input id="sUpdateUrl" placeholder="https://ghproxy.net/https://raw.githubusercontent.com/xcw080720/weixuezhang/main/dist/kebiao.apk">
       </div>
       <button class="btn block" id="btnUpdate">下载并安装</button>
       <div id="uStatus" style="margin-top:10px"></div>
-      <div class="muted" style="margin-top:8px">下载完成会调起系统安装器，点「安装」就是覆盖升级，课表数据会保留。更新包必须和已装版本同一签名，否则系统会拒绝安装。</div>
+      <div class="muted" style="margin-top:8px">下载完成会调起系统安装器，点「安装」就是覆盖升级，课表数据会保留。更新包必须和已装版本同一签名，否则系统会拒绝安装。默认走 ghproxy.net 加速；这个代理失效的话换成 ghfast.top 或 gh-proxy.com 的同款前缀即可。</div>
     </div>
 
     <h3>数据</h3>

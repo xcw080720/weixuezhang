@@ -101,7 +101,8 @@ function defaults() {
     remindEnabled: true,
     holidays: '',
     makeup: '',
-    updateUrl: '',
+    // 更新包放在仓库 dist/kebiao.apk，走国内 GitHub 加速代理下载（可随时改成 OSS 或其他镜像）
+    updateUrl: 'https://ghproxy.net/https://raw.githubusercontent.com/xcw080720/weixuezhang/main/dist/kebiao.apk',
     chatLog: [],
     ai: { baseURL: 'https://api.deepseek.com/v1', apiKey: '', model: 'deepseek-chat' }
   };
