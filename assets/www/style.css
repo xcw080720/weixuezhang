@@ -129,7 +129,7 @@ label.f { display: block; margin-bottom: 4px; font-size: 12px; color: var(--mute
   background: linear-gradient(180deg, #1A2130 0%, #161B22 100%);
   border: 1px solid #2C3A4E;
 }
-.next .cd { font-size: 34px; font-weight: 800; letter-spacing: 1px; color: var(--accent); font-variant-numeric: tabular-nums; }
+.next .cd { font-size: clamp(22px, 8.2vw, 34px); font-weight: 800; letter-spacing: 1px; color: var(--accent); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .next.going .cd { color: var(--ok); }
 
 .lesson {
@@ -210,6 +210,17 @@ table.grid td.cell.empty { cursor: default; }
 .period-row input { padding: 6px 8px; font-size: 13px; text-align: center; }
 
 .stack { display: flex; flex-direction: column; gap: 8px; }
+
+/* ---------- 手动录入表单 ---------- */
+.pickrow { display: flex; flex-wrap: wrap; gap: 6px; }
+.pickrow .chip { margin: 0; cursor: pointer; padding: 7px 12px; font-size: 13px; }
+.pickrow .chip.on { background: rgba(74,140,247,.18); border-color: var(--accent); color: var(--accent); font-weight: 600; }
+.pickrow.grid7 { display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px; }
+.pickrow.grid5 { display: grid; grid-template-columns: repeat(5, 1fr); gap: 4px; }
+.pickrow.grid7 .chip, .pickrow.grid5 .chip { padding: 8px 1px; text-align: center; font-size: 12.5px; }
+details.more { margin: 10px 0 8px; border-top: 1px solid var(--line); padding-top: 8px; }
+details.more summary { font-size: 12.5px; color: var(--muted); cursor: pointer; padding: 4px 0; }
+#cName { font-size: 16px; padding: 11px 12px; }
 
 /* ---------- 假期 ---------- */
 table.grid th.hol { color: var(--warn); background: rgba(210,153,34,.10); }

@@ -13,8 +13,10 @@
 - **课表**：「今天」列表 / 周视图，支持连续周、单双周、指定周（如 `1,3,5`）
 - **提醒**：每门课可设提前量，`AlarmManager` 精确闹钟 + 通知，重启后由 `BOOT_COMPLETED` 重排
 - **假期 / 停课日**：一行一条，`国庆 2026-10-01 ~ 2026-10-07`；这些天课表不显示、闹钟也不排
+- **调休补课日**：一行一条，`2026-10-11 补 周二`（也可以写被补的日期 `2026-10-11 2026-10-06`）；这些天按对应星期的课表上课，调到周末的课同样显示、同样提醒
 - **对话改课表**：直接跟模型说话（「把周三的高数挪到周四」），它先给一份改动清单，**点了「应用」才真的改**
 - **手动录入**：周视图右上角「＋」直接建课
+- **软件更新**：设置 → 软件更新里填更新包直链（阿里云 OSS 等 http/https 地址），一键下载并调起系统安装器；覆盖升级数据保留。更新包必须用同一签名构建，否则系统会拒绝替换
 - 全部本地存储，课表是 App 私有目录里的一个 JSON
 
 ## 它是怎么「看懂」的
@@ -71,6 +73,7 @@ src/com/xcw/kebiao/
     OfficeParser.java   零依赖解析 xlsx / docx / csv（不依赖任何第三方库）
     Scheduler.java      闹钟排期（AlarmManager）+ 通知
     Store.java          轻量 JSON 持久化
+    UpdateProvider.java 更新包 ContentProvider（把 cache/update.apk 交给系统安装器）
     ReminderReceiver.java / BootReceiver.java
 assets/www/             UI（index.html / app.js / style.css），纯前端零依赖
 res/                    图标与字符串

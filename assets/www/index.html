@@ -36,6 +36,7 @@
       <button class="wbtn add" id="wAdd">＋</button>
     </div>
     <div class="gridwrap"><div id="grid"></div></div>
+    <div id="wkTip" class="muted" style="margin-top:8px"></div>
     <div class="muted" style="margin-top:8px">点课块可以改或删；右上角「＋」手动加新课。课表空着的话，也可以去「导入」。</div>
   </section>
 
@@ -47,6 +48,7 @@
       <button class="btn ghost" id="btnPaste">粘贴文字</button>
       <button class="btn ghost" id="btnDemo">塞个样例</button>
     </div>
+    <button class="btn ghost block" id="btnManualAdd" style="margin-top:10px">手动加一门课（不靠 AI）</button>
     <div id="impStatus" style="margin-top:12px"></div>
     <div id="draftWrap"></div>
   </section>
@@ -111,6 +113,10 @@
         <label class="f">名称</label>
         <input id="sTermName" placeholder="2026 秋">
       </div>
+      <div class="row between" style="margin-top:12px">
+        <span class="small">周视图显示周末</span>
+        <input type="checkbox" id="sWeekend" style="width:auto">
+      </div>
     </div>
 
     <h3>假期 / 停课日</h3>
@@ -124,6 +130,19 @@
         <button class="btn ghost" id="btnHolClear">清空</button>
       </div>
       <div id="holStatus" style="margin-top:10px"></div>
+    </div>
+
+    <h3>调休补课日</h3>
+    <div class="card">
+      <div class="field">
+        <label class="f">一行一条：某个日期按哪天的课表上课（周末补课用）</label>
+        <textarea id="sMakeup" placeholder="2026-10-11 补 周二&#10;2026-10-18 2026-10-09　（补 10-09 周五的课）&#10;# 井号开头这行会被忽略"></textarea>
+      </div>
+      <div class="two">
+        <button class="btn ghost" id="btnMkTip">填个格式样例</button>
+        <button class="btn ghost" id="btnMkClear">清空</button>
+      </div>
+      <div id="mkStatus" style="margin-top:10px"></div>
     </div>
 
     <h3>节次时间</h3>
@@ -143,6 +162,18 @@
       <div id="remindStatus" style="margin-top:10px"></div>
     </div>
 
+    <h3>软件更新</h3>
+    <div class="card">
+      <div class="kv"><span>当前版本</span><span id="uVersion">—</span></div>
+      <div class="field" style="margin-top:8px">
+        <label class="f">更新包地址（http/https 直链，例如阿里云 OSS）</label>
+        <input id="sUpdateUrl" placeholder="https://xxx.oss-cn-beijing.aliyuncs.com/kebiao/kebiao.apk">
+      </div>
+      <button class="btn block" id="btnUpdate">下载并安装</button>
+      <div id="uStatus" style="margin-top:10px"></div>
+      <div class="muted" style="margin-top:8px">下载完成会调起系统安装器，点「安装」就是覆盖升级，课表数据会保留。更新包必须和已装版本同一签名，否则系统会拒绝安装。</div>
+    </div>
+
     <h3>数据</h3>
     <div class="card">
       <div class="kv"><span>课程数</span><span id="dCount">0</span></div>
@@ -155,7 +186,7 @@
       <div class="muted" style="margin-top:8px">导出的是一段 JSON，复制走就能备份/换机。</div>
     </div>
 
-    <div class="muted" style="text-align:center;margin:18px 0 6px">苇学长 v1.0 · 数据只存在本机</div>
+    <div class="muted" style="text-align:center;margin:18px 0 6px">苇学长 · 数据只存在本机</div>
   </section>
 
 </main>

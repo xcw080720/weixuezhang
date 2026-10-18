@@ -3,3 +3,5 @@ _shots/
 _testout/
 *.class
 *.log
+
+shots/

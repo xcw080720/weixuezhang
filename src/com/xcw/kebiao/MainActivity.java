@@ -28,8 +28,11 @@ import org.json.JSONObject;
 
 import java.io.File;
 import java.io.FileOutputStream;
+import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.net.HttpURLConnection;
+import java.net.URL;
 
 public class MainActivity extends Activity {
 
@@ -527,6 +530,88 @@ public class MainActivity extends Activity {
             try {
                 startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(url)));
             } catch (Exception ignore) { }
+        }
+
+        // -------------------------------------------------------- 自动更新
+
+        /** 当前版本号 + 是否已经下载过更新包 */
+        @JavascriptInterface
+        public String updateInfo() {
+            JSONObject o = new JSONObject();
+            try {
+                android.content.pm.PackageInfo pi = getPackageManager().getPackageInfo(getPackageName(), 0);
+                o.put("versionName", pi.versionName);
+                o.put("versionCode", pi.versionCode);
+                o.put("hasApk", new File(getCacheDir(), UpdateProvider.APK_NAME).exists());
+            } catch (Throwable ignore) { }
+            return o.toString();
+        }
+
+        /** 后台下载更新包到 cache/update.apk，完成后回调 window.__onUpdate */
+        @JavascriptInterface
+        public void downloadUpdate(final String url) {
+            final String u = url == null ? "" : url.trim();
+            if (!(u.startsWith("http://") || u.startsWith("https://"))) {
+                cb("__onUpdate", "{\"ok\":false,\"error\":\"更新地址要是 http/https 开头\"}");
+                return;
+            }
+            new Thread(new Runnable() {
+                @Override public void run() {
+                    JSONObject out = new JSONObject();
+                    try {
+                        HttpURLConnection c = (HttpURLConnection) new URL(u).openConnection();
+                        c.setConnectTimeout(15000);
+                        c.setReadTimeout(120000);
+                        c.setInstanceFollowRedirects(true);
+                        c.setRequestProperty("User-Agent", "kebiao-updater/1.0");
+                        c.connect();
+                        int code = c.getResponseCode();
+                        if (code != 200) throw new IOException("HTTP " + code);
+                        File apk = new File(getCacheDir(), UpdateProvider.APK_NAME);
+                        File tmp = new File(getCacheDir(), UpdateProvider.APK_NAME + ".part");
+                        InputStream in = c.getInputStream();
+                        FileOutputStream fo = new FileOutputStream(tmp);
+                        byte[] buf = new byte[8192];
+                        long total = 0;
+                        int n;
+                        while ((n = in.read(buf)) > 0) {
+                            fo.write(buf, 0, n);
+                            total += n;
+                        }
+                        fo.close();
+                        in.close();
+                        c.disconnect();
+                        if (apk.exists()) apk.delete();
+                        if (!tmp.renameTo(apk)) throw new IOException("无法保存更新包");
+                        out.put("ok", true);
+                        out.put("bytes", total);
+                        out.put("versionCheck", true);
+                    } catch (Throwable t) {
+                        Log.w(TAG, "downloadUpdate: " + t);
+                        try {
+                            out.put("ok", false);
+                            out.put("error", String.valueOf(t.getMessage() == null ? t.toString() : t.getMessage()));
+                        } catch (Exception ignore) { }
+                    }
+                    cb("__onUpdate", out.toString());
+                }
+            }).start();
+        }
+
+        /** 用系统安装器打开已下载的更新包（同签名覆盖安装，数据保留） */
+        @JavascriptInterface
+        public void installUpdate() {
+            try {
+                File apk = new File(getCacheDir(), UpdateProvider.APK_NAME);
+                if (!apk.exists()) { toastNow("还没有下载好的更新包，先点下载"); return; }
+                Intent i = new Intent(Intent.ACTION_VIEW);
+                i.setDataAndType(Uri.parse(UpdateProvider.URI_APK), "application/vnd.android.package-archive");
+                i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_ACTIVITY_NEW_TASK);
+                startActivity(i);
+            } catch (Throwable t) {
+                Log.w(TAG, "installUpdate: " + t);
+                toastNow("调不起系统安装器：" + t.getMessage());
+            }
         }
     }
 }

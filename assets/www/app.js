@@ -84,6 +84,7 @@ function defaults() {
     semesterName: '',
     termStart: '',
     totalWeeks: 20,
+    showWeekend: true,
     periods: [
       { no: 1, start: '08:00', end: '08:45' },
       { no: 2, start: '08:55', end: '09:40' },
@@ -99,6 +100,8 @@ function defaults() {
     defaultOffsets: [15],
     remindEnabled: true,
     holidays: '',
+    makeup: '',
+    updateUrl: '',
     chatLog: [],
     ai: { baseURL: 'https://api.deepseek.com/v1', apiKey: '', model: 'deepseek-chat' }
   };
@@ -200,6 +203,50 @@ function holidayTag(dateStr) {
   return n ? n : '假期';
 }
 
+/* ============================ 调休补课 ============================
+   一行一条，支持两种写法：
+     2026-10-11 补 周二        这一天按周二的课表上课
+     2026-10-11 2026-10-06     同上，写被补的那天更不容易错
+     # 开头                   注释，忽略
+   调休日优先于假期：即使它被写进「假期 / 停课日」，也照常上课。
+   只改「哪天上课」，不改课程本身的周次；周次仍按当天所在的教学周算。 */
+const DOW_CN = { '一': 1, '二': 2, '三': 3, '四': 4, '五': 5, '六': 6, '日': 7, '天': 7 };
+function dowOf(text) {
+  const s = String(text || '');
+  let m = s.match(/(?:周|星期|礼拜)\s*([一二三四五六日天1-7])/);
+  if (m) {
+    const c = m[1];
+    return (c >= '1' && c <= '7') ? Number(c) : (DOW_CN[c] || 0);
+  }
+  m = s.match(/(?:^|\D)([1-7])(?:\D|$)/);
+  return m ? Number(m[1]) : 0;
+}
+let MK = null, MK_RAW = null;
+function makeupMap() {
+  if (MK && MK_RAW === S.makeup) return MK;
+  const map = {};
+  let bad = 0;
+  const lines = String(S.makeup || '').split(/\r?\n/);
+  for (let i = 0; i < lines.length; i++) {
+    const raw = lines[i].trim();
+    if (!raw || raw.charAt(0) === '#') continue;
+    const ds = raw.match(/\d{4}[-/.]\d{1,2}[-/.]\d{1,2}/g) || [];
+    const date = ds.length ? parseD(ds[0]) : null;
+    if (!date) { bad++; continue; }
+    let dow = 0;
+    if (ds.length > 1) {
+      const target = parseD(ds[1]);
+      if (target) dow = target.getDay() === 0 ? 7 : target.getDay();
+    }
+    if (!dow) dow = dowOf(raw.replace(ds[0], ' '));
+    if (!dow) { bad++; continue; }
+    map[fmtDate(date)] = dow;
+  }
+  MK = { map: map, bad: bad };
+  MK_RAW = S.makeup;
+  return MK;
+}
+
 /* ============================ 课表算法 ============================ */
 function nowWeek() {
   const t = parseD(S.termStart);
@@ -221,10 +268,12 @@ function occursInWeek(c, w) {
   if (t === 'list') return (wk.list || []).map(Number).indexOf(w) >= 0;
   return w >= from && w <= to;
 }
-function occOf(c, w) {
+function occOf(c, w, dateOverride) {
   const base = parseD(S.termStart);
   if (!base) return null;
-  const date = addDays(mondayOf(base), (w - 1) * 7 + (Number(c.day) - 1));
+  const override = dateOverride instanceof Date ? dateOverride : null;
+  const date = override || addDays(mondayOf(base), (w - 1) * 7 + (Number(c.day) - 1));
+  const dow = override ? (date.getDay() === 0 ? 7 : date.getDay()) : Number(c.day);
   const p1 = periodOf(c.periodFrom), p2 = periodOf(c.periodTo || c.periodFrom);
   if (!p1 || !p2) return null;
   const sMin = hm2min(p1.start), eMin = hm2min(p2.end);
@@ -233,13 +282,21 @@ function occOf(c, w) {
   const en = new Date(date.getFullYear(), date.getMonth(), date.getDate(), Math.floor(eMin / 60), eMin % 60, 0, 0);
   return {
     course: c, courseId: c.id, name: c.name, teacher: c.teacher || '', location: c.location || '',
-    day: Number(c.day), dayName: DAYS[Number(c.day)] || '', periodFrom: Number(c.periodFrom),
+    day: dow, dayName: DAYS[dow] || '', periodFrom: Number(c.periodFrom),
     periodTo: Number(c.periodTo || c.periodFrom), week: w, date: fmtDate(date),
     startHM: min2hm(sMin), endHM: min2hm(eMin), startLocal: st.getTime(), endLocal: en.getTime()
   };
 }
 function occForWeek(w) {
   const out = [];
+  const seen = {};
+  function push(o) {
+    if (!o) return;
+    const k = o.courseId + '|' + o.date;
+    if (seen[k]) return;
+    seen[k] = 1;
+    out.push(o);
+  }
   for (let i = 0; i < courses.length; i++) {
     const c = courses[i];
     if (c.enabled === false) continue;
@@ -247,7 +304,26 @@ function occForWeek(w) {
     const o = occOf(c, w);
     if (!o) continue;
     if (isHoliday(o.date)) continue;   // 假期：这门课这周不算
-    out.push(o);
+    push(o);
+  }
+  // 调休补课：本周内被指定的日期，按另一天的课表再排一遍（该日期即使落在假期也照常上）
+  const mk = makeupMap();
+  const base = parseD(S.termStart);
+  if (base) {
+    const mon = addDays(mondayOf(base), (w - 1) * 7);
+    const sun = addDays(mon, 6);
+    for (const k in mk.map) {
+      const d = parseD(k);
+      if (!d || d < mon || d > sun) continue;
+      const dow = mk.map[k];
+      for (let i = 0; i < courses.length; i++) {
+        const c = courses[i];
+        if (c.enabled === false) continue;
+        if (Number(c.day) !== dow) continue;
+        if (!occursInWeek(c, w)) continue;
+        push(occOf(c, w, d));
+      }
+    }
   }
   out.sort(function (a, b) { return a.startLocal - b.startLocal; });
   return out;
@@ -459,6 +535,21 @@ function renderWeek() {
   // 本周每一天的日期 + 是不是假期（假期那列不上课，标出来免得以为是漏课）
   const base = parseD(S.termStart);
   const mon = base ? addDays(mondayOf(base), (ui.week - 1) * 7) : null;
+
+  // 「周末显示」开关：关掉后只画周一到周五；但有调休落在周末时那一列要画出来，否则补课看不到
+  const showWd = S.showWeekend !== false;
+  const days = showWd ? [1, 2, 3, 4, 5, 6, 7] : [1, 2, 3, 4, 5];
+  const mkMap = makeupMap().map;
+  if (!showWd && mon) {
+    for (const k in mkMap) {
+      const d = parseD(k);
+      if (!d || d < mon || d > addDays(mon, 6)) continue;
+      const dw = d.getDay() === 0 ? 7 : d.getDay();
+      if (days.indexOf(dw) < 0) days.push(dw);
+    }
+    days.sort(function (a, b) { return a - b; });
+  }
+
   const dayHol = [];
   for (let d = 1; d <= 7; d++) dayHol.push(mon ? holidayTag(fmtDate(addDays(mon, d - 1))) : '');
   const holSpans = [];
@@ -482,7 +573,8 @@ function renderWeek() {
 
   const todayDowNow = todayDow();
   let html = '<table class="grid"><tr><th style="width:34px">节</th>';
-  for (let d = 1; d <= 7; d++) {
+  for (let di = 0; di < days.length; di++) {
+    const d = days[di];
     html += '<th class="' + (d === todayDowNow && ui.week === cw ? 'today' : '') +
       (dayHol[d - 1] ? ' hol' : '') + '">' + DAYS[d].slice(1) + '</th>';
   }
@@ -492,10 +584,15 @@ function renderWeek() {
     const p = periods[pi];
     const per = periodOf(p);
     html += '<tr><td class="slot"><b>' + p + '</b>' + (per ? esc(per.start) : '') + '</td>';
-    for (let d = 1; d <= 7; d++) {
+    for (let di = 0; di < days.length; di++) {
+      const d = days[di];
       if (covered[d + '_' + p]) continue;
       const o = cellMap[d + '_' + p];
-      if (!o) { html += '<td class="cell empty' + (dayHol[d - 1] ? ' hol' : '') + '"></td>'; continue; }
+      if (!o) {
+        html += '<td class="cell empty' + (dayHol[d - 1] ? ' hol' : '') +
+          '" data-day="' + d + '" data-p="' + p + '"></td>';
+        continue;
+      }
       const span = o.periodTo - o.periodFrom + 1;
       html += '<td class="cell" rowspan="' + span + '" data-oid="' + esc(o.courseId) + '">' +
         '<span class="blk" style="background:' + colorOf(o.course) + '">' + esc(o.name) + '</span></td>';
@@ -503,10 +600,33 @@ function renderWeek() {
     html += '</tr>';
   }
   html += '</table>';
-  if (holSpans.length) {
-    html = '<div class="holbar">本周假期：' + esc(holSpans.join(' · ')) + '（不上课，不提醒）</div>' + html;
+  // 本周调休：哪个日期按哪天的课表上课
+  const mkSps = [];
+  if (mon) {
+    for (const k in mkMap) {
+      const d = parseD(k);
+      if (!d || d < mon || d > addDays(mon, 6)) continue;
+      const dw = d.getDay() === 0 ? 7 : d.getDay();
+      mkSps.push(k + '（' + DAYS[dw] + '）按' + DAYS[mkMap[k]] + '课表上课');
+    }
+  }
+  if (holSpans.length || mkSps.length) {
+    let bar = '';
+    if (holSpans.length) bar += '本周假期：' + esc(holSpans.join(' · ')) + '（不上课，不提醒）';
+    if (mkSps.length) bar += (bar ? '；' : '') + '调休：' + esc(mkSps.join('；'));
+    html = '<div class="holbar">' + bar + '</div>' + html;
   }
   $('grid').innerHTML = html;
+  const wkTip = $('wkTip');
+  if (wkTip) {
+    // 只统计真正没画出来的周末课；有调休的周末列会被强制画出来，不算隐藏
+    const hidden = list.filter(function (o) {
+      return o.day >= 6 && days.indexOf(Number(o.day)) < 0;
+    }).length;
+    wkTip.textContent = (!showWd && hidden)
+      ? '周末还有 ' + hidden + ' 门课没显示；想看得去「设置 → 学期」里打开「周视图显示周末」。'
+      : '';
+  }
 }
 
 /* ============================ 渲染：设置 ============================ */
@@ -526,6 +646,25 @@ function renderHolStatus() {
     (h.bad ? '<div class="note warn">有 ' + h.bad + ' 行没看懂，已跳过（一行一条，日期或「起 ~ 止」）。</div>' : '');
 }
 
+function renderMakeupStatus() {
+  const el = $('mkStatus');
+  if (!el) return;
+  const mk = makeupMap();
+  const keys = Object.keys(mk.map).sort();
+  if (!keys.length) {
+    el.innerHTML = '<div class="note">还没填调休。填了之后：这些日期按对应星期的课表上课，原来那天的课不会丢。' +
+      '（比如国庆把 10-11 周六调去上周二的课）</div>';
+    return;
+  }
+  const parts = keys.map(function (k) {
+    const d = parseD(k);
+    const dw = d ? (d.getDay() === 0 ? 7 : d.getDay()) : 0;
+    return k + '（' + (DAYS[dw] || '') + '）按' + DAYS[mk.map[k]] + '课表';
+  });
+  el.innerHTML = '<div class="note ok">共 ' + keys.length + ' 条：' + esc(parts.join('；')) + '</div>' +
+    (mk.bad ? '<div class="note warn">有 ' + mk.bad + ' 行没看懂，已跳过（一行一条：日期 + 周几，或两个日期）。</div>' : '');
+}
+
 function renderSettings() {
   $('sBase').value = S.ai.baseURL || '';
   $('sKey').value = S.ai.apiKey || '';
@@ -533,10 +672,18 @@ function renderSettings() {
   $('sTerm').value = S.termStart || '';
   $('sWeeks').value = S.totalWeeks || 20;
   $('sTermName').value = S.semesterName || '';
+  $('sWeekend').checked = S.showWeekend !== false;
   $('sOffsets').value = (S.defaultOffsets || []).join(',');
   $('sRemindOn').checked = S.remindEnabled !== false;
   $('sHolidays').value = S.holidays || '';
+  $('sMakeup').value = S.makeup || '';
+  $('sUpdateUrl').value = S.updateUrl || '';
+  try {
+    const uinf = JSON.parse(Native.updateInfo() || '{}');
+    $('uVersion').textContent = (uinf.versionName || '1.0') + (uinf.versionCode ? '（versionCode ' + uinf.versionCode + '）' : '');
+  } catch (e) { $('uVersion').textContent = '1.0'; }
   renderHolStatus();
+  renderMakeupStatus();
   $('dCount').textContent = courses.length + ' 门';
   try {
     const inf = JSON.parse(Native.info() || '{}');
@@ -588,6 +735,8 @@ function openSheet(title, bodyHtml, after) {
     '</div></div>';
   $('sheetClose').onclick = closeSheet;
   const mask = $('sheetMask');
+  const panel = mask.querySelector('.panel');
+  if (panel) panel.scrollTop = 0;
   mask.onclick = function (e) { if (e.target === mask) closeSheet(); };
   if (after) after();
 }
@@ -608,76 +757,174 @@ function blankCourse() {
   };
 }
 
-function openCourse(courseId) {
+/** 生成 1..n 的 <option>，cur 为选中值；节次 / 周次下拉用，省得手打数字 */
+function optSeq(n, cur) {
+  let h = '';
+  for (let i = 1; i <= n; i++) h += '<option value="' + i + '"' + (Number(cur) === i ? ' selected' : '') + '>' + i + '</option>';
+  return h;
+}
+
+/**
+ * 打开课程编辑弹层。
+ * courseId 为空 = 新建；preset 预填 { day, from, to, name, teacher, location, weeks }。
+ * 周视图点空格子会带 preset 进来，直接就是那一格。
+ */
+function openCourse(courseId, preset) {
   const isNew = !courseId;
   const c = isNew
     ? blankCourse()
     : courses.filter(function (x) { return x.id === courseId; })[0];
   if (!c) return;
+  let maxNo = 1;
+  for (let i = 0; i < S.periods.length; i++) maxNo = Math.max(maxNo, Number(S.periods[i].no) || 1);
+  if (isNew && preset) {
+    if (preset.day) c.day = Math.min(7, Math.max(1, Number(preset.day)));
+    if (preset.from) {
+      c.periodFrom = Math.max(1, Math.min(maxNo, Number(preset.from)));
+      c.periodTo = Math.max(c.periodFrom, Math.min(maxNo, Number(preset.to) || (c.periodFrom + 1)));
+    }
+    if (preset.name) c.name = preset.name;
+    if (preset.teacher) c.teacher = preset.teacher;
+    if (preset.location) c.location = preset.location;
+    if (preset.weeks) c.weeks = preset.weeks;
+  }
   ui.editingId = courseId || null;
-  const wk = c.weeks || { type: 'range', from: 1, to: 16 };
+  const wk = c.weeks || { type: 'range', from: 1, to: S.totalWeeks || 16, list: [] };
+  const weekMax = Math.max(30, Number(S.totalWeeks) || 20);
+  const cOffVal = c.remindEnabled === false ? '-1' : (c.remindOffsets || []).join(',');
+
   const body =
-    '<div class="field"><label class="f">课程名</label><input id="cName" value="' + esc(c.name) + '"></div>' +
+    '<div class="field"><label class="f">课程名</label><input id="cName" value="' + esc(c.name) + '" placeholder="比如：高等数学" autocomplete="off"></div>' +
     '<div class="two"><div class="field"><label class="f">老师</label><input id="cTeacher" value="' + esc(c.teacher || '') + '"></div>' +
     '<div class="field"><label class="f">地点</label><input id="cLoc" value="' + esc(c.location || '') + '"></div></div>' +
-    '<div class="three">' +
-      '<div class="field"><label class="f">星期</label><select id="cDay">' +
-        [1,2,3,4,5,6,7].map(function (d) { return '<option value="' + d + '"' + (Number(c.day) === d ? ' selected' : '') + '>' + DAYS[d] + '</option>'; }).join('') +
-      '</select></div>' +
-      '<div class="field"><label class="f">起始节</label><input id="cFrom" type="number" min="1" value="' + c.periodFrom + '"></div>' +
-      '<div class="field"><label class="f">结束节</label><input id="cTo" type="number" min="1" value="' + (c.periodTo || c.periodFrom) + '"></div>' +
-    '</div>' +
-    '<div class="field"><label class="f">周次类型</label><select id="cWType">' +
-      ['range:连续周次', 'odd:单周', 'even:双周', 'list:不连续', 'all:全周'].map(function (o) {
-        const v = o.split(':')[0];
-        return '<option value="' + v + '"' + ((wk.type || 'range') === v ? ' selected' : '') + '>' + o.split(':')[1] + '</option>';
+    '<div class="field"><label class="f">星期</label><div class="pickrow grid7" id="cDayChips">' +
+      [1,2,3,4,5,6,7].map(function (d) {
+        return '<span class="chip pick" data-day="' + d + '">' + DAYS[d] + '</span>';
       }).join('') +
-    '</select></div>' +
-    '<div class="two"><div class="field"><label class="f">从第几周</label><input id="cWFrom" type="number" min="1" value="' + (wk.from || 1) + '"></div>' +
-    '<div class="field"><label class="f">到第几周</label><input id="cWTo" type="number" min="1" value="' + (wk.to || 16) + '"></div></div>' +
-    '<div class="field"><label class="f">不连续周次（逗号分隔，如 1,3,5,7）</label><input id="cWList" value="' + esc((wk.list || []).join(',')) + '"></div>' +
-    '<div class="field"><label class="f">提醒提前量（分钟，逗号分隔；留空用默认；填 -1 关掉这门课提醒）</label>' +
-      '<input id="cOff" value="' + esc((c.remindOffsets || []).join(',')) + '"></div>' +
+    '</div></div>' +
+    '<div class="field"><label class="f">节次</label><div class="row" style="gap:8px">' +
+      '<select id="cFrom" style="flex:1">' + optSeq(maxNo, c.periodFrom) + '</select>' +
+      '<span class="muted">到</span>' +
+      '<select id="cTo" style="flex:1">' + optSeq(maxNo, c.periodTo || c.periodFrom) + '</select>' +
+    '</div></div>' +
+    '<div class="field"><label class="f">周次</label><div class="pickrow grid5" id="cWTChips">' +
+      [['range','连续周'],['odd','单周'],['even','双周'],['all','全周'],['list','指定周']].map(function (o) {
+        return '<span class="chip pick" data-wt="' + o[0] + '">' + o[1] + '</span>';
+      }).join('') +
+    '</div>' +
+    '<div id="cWRange" style="margin-top:8px"><div class="row" style="gap:8px">' +
+      '<span class="muted small" style="white-space:nowrap">第</span><select id="cWFrom" style="flex:1">' + optSeq(weekMax, wk.from || 1) + '</select>' +
+      '<span class="muted" style="white-space:nowrap">—</span><select id="cWTo" style="flex:1">' + optSeq(weekMax, wk.to || S.totalWeeks || 16) + '</select>' +
+      '<span class="muted small" style="white-space:nowrap">周</span></div></div>' +
+    '<div id="cWListBox" style="margin-top:8px;display:none"><input id="cWList" placeholder="逗号分隔，如 1,3,5,7" value="' + esc((wk.list || []).join(',')) + '"></div>' +
+    '<div id="cWAllBox" class="muted small" style="margin-top:8px;display:none">每一周都上，不限周次。</div>' +
+    '</div>' +
+    '<details class="more"><summary>提醒（可选）</summary>' +
+      '<div class="field" style="margin:8px 0 0"><label class="f">提前几分钟提醒（逗号分隔；留空用默认；-1 关掉这门课）</label>' +
+      '<input id="cOff" value="' + esc(cOffVal) + '"></div>' +
+    '</details>' +
     '<div class="two" style="margin-top:4px">' +
       '<button class="btn" id="cSave">' + (isNew ? '加进课表' : '保存') + '</button>' +
-      '<button class="btn danger" id="cDel">删除</button>' +
+      (isNew ? '<button class="btn ghost" id="cSaveNext">再来一节</button>' : '<button class="btn danger" id="cDel">删除</button>') +
     '</div>';
   openSheet(isNew ? '新建课程' : '编辑课程', body, function () {
-    $('cWType').onchange = function () {
-      const t = this.value;
-      $('cWFrom').disabled = (t === 'all' || t === 'list');
-      $('cWTo').disabled = (t === 'all' || t === 'list');
-      $('cWList').disabled = (t !== 'list');
-    };
-    $('cWType').onchange();
-    $('cSave').onclick = function () {
-      c.name = $('cName').value.trim() || '未命名';
-      c.teacher = $('cTeacher').value.trim();
-      c.location = $('cLoc').value.trim();
-      c.day = Number($('cDay').value);
-      c.periodFrom = Math.max(1, Number($('cFrom').value) || 1);
-      c.periodTo = Math.max(c.periodFrom, Number($('cTo').value) || c.periodFrom);
-      const t = $('cWType').value;
-      c.weeks = { type: t, from: Number($('cWFrom').value) || 1, to: Number($('cWTo').value) || 16, list: [] };
-      if (t === 'list') {
-        c.weeks.list = $('cWList').value.split(/[,，\s]+/).map(Number).filter(function (n) { return n > 0; });
+    /* ---- 星期：7 个 chip 直选 ---- */
+    let day = Math.min(7, Math.max(1, Number(c.day) || todayDow()));
+    const dayChips = $('cDayChips').querySelectorAll('.chip');
+    function markDay() {
+      for (let i = 0; i < dayChips.length; i++) {
+        dayChips[i].className = 'chip pick' + (Number(dayChips[i].getAttribute('data-day')) === day ? ' on' : '');
+      }
+    }
+    markDay();
+    for (let i = 0; i < dayChips.length; i++) {
+      dayChips[i].onclick = function () { day = Number(this.getAttribute('data-day')); markDay(); };
+    }
+
+    /* ---- 节次：下拉 + 自动保证 起 <= 止 ---- */
+    const fromSel = $('cFrom'), toSel = $('cTo');
+    fromSel.onchange = function () { if (Number(toSel.value) < Number(fromSel.value)) toSel.value = fromSel.value; };
+    toSel.onchange = function () { if (Number(fromSel.value) > Number(toSel.value)) fromSel.value = toSel.value; };
+
+    /* ---- 周次：类型 chip，只显示对应输入 ---- */
+    let wt = wk.type || 'range';
+    const wtChips = $('cWTChips').querySelectorAll('.chip');
+    function markWt() {
+      for (let i = 0; i < wtChips.length; i++) {
+        wtChips[i].className = 'chip pick' + (wtChips[i].getAttribute('data-wt') === wt ? ' on' : '');
+      }
+      $('cWRange').style.display = (wt === 'all' || wt === 'list') ? 'none' : '';
+      $('cWListBox').style.display = wt === 'list' ? '' : 'none';
+      $('cWAllBox').style.display = wt === 'all' ? '' : 'none';
+    }
+    markWt();
+    for (let i = 0; i < wtChips.length; i++) {
+      wtChips[i].onclick = function () { wt = this.getAttribute('data-wt'); markWt(); };
+    }
+
+    /* ---- 收集表单 ---- */
+    function collect() {
+      const name = $('cName').value.trim();
+      if (!name) { toast('先给课程起个名'); $('cName').focus(); return null; }
+      let f = Number(fromSel.value), t = Number(toSel.value);
+      if (!(f >= 1)) f = 1;
+      if (!(t >= f)) t = f;
+      const out = {
+        name: name,
+        teacher: $('cTeacher').value.trim(),
+        location: $('cLoc').value.trim(),
+        day: day,
+        periodFrom: f,
+        periodTo: t,
+        weeks: { type: wt, from: Number($('cWFrom').value) || 1, to: Number($('cWTo').value) || (S.totalWeeks || 16), list: [] },
+        remindEnabled: true,
+        remindOffsets: []
+      };
+      if (wt === 'list') {
+        const list = $('cWList').value.split(/[,，\s]+/).map(Number).filter(function (n) { return n > 0; });
+        if (!list.length) { toast('「指定周」还没填周次，这门课会一次都不出现'); $('cWList').focus(); return null; }
+        out.weeks.list = list;
+        out.weeks.from = Math.min.apply(null, list);
+        out.weeks.to = Math.max.apply(null, list);
       }
       const raw = $('cOff').value.trim();
-      if (raw === '') c.remindOffsets = [];
-      else if (raw === '-1') { c.remindEnabled = false; c.remindOffsets = []; }
-      else { c.remindEnabled = true; c.remindOffsets = raw.split(/[,，\s]+/).map(Number).filter(function (n) { return n >= 0; }); }
+      if (raw === '-1') { out.remindEnabled = false; }
+      else if (raw !== '') {
+        out.remindOffsets = raw.split(/[,，\s]+/).map(Number).filter(function (n) { return n >= 0; });
+      }
+      return out;
+    }
+
+    function save(again) {
+      const data = collect();
+      if (!data) return;
       if (isNew) {
-        c.id = 'c' + Date.now().toString(36) + Math.floor(Math.random() * 1000).toString(36);
-        courses.push(c);
+        data.id = 'c' + Date.now().toString(36) + Math.floor(Math.random() * 1000).toString(36);
+        courses.push(data);
+      } else {
+        c.name = data.name; c.teacher = data.teacher; c.location = data.location;
+        c.day = data.day; c.periodFrom = data.periodFrom; c.periodTo = data.periodTo;
+        c.weeks = data.weeks; c.remindEnabled = data.remindEnabled; c.remindOffsets = data.remindOffsets;
       }
       persist(); armReminders(); closeSheet(); renderAll();
       toast(isNew ? '已加进课表' : '已保存');
-    };
-    if (isNew) $('cDel').style.display = 'none';
-    $('cDel').onclick = function () {
+      if (again && isNew) {
+        // 同一门课常常还有别的时段：老师/地点/周次/名字带过去，节次从下一节开始
+        const nf = Math.min(data.periodTo + 1, maxNo);
+        openCourse(null, {
+          day: data.day, from: nf, to: Math.min(nf + 1, maxNo),
+          name: data.name, teacher: data.teacher, location: data.location, weeks: data.weeks
+        });
+      }
+    }
+    $('cSave').onclick = function () { save(false); };
+    if ($('cSaveNext')) $('cSaveNext').onclick = function () { save(true); };
+    if ($('cDel')) $('cDel').onclick = function () {
       courses = courses.filter(function (x) { return x.id !== c.id; });
       persist(); armReminders(); closeSheet(); renderAll(); toast('已删除');
     };
+    // 新建直接聚焦课程名，不用再点一下
+    try { $('cName').focus(); } catch (e) {}
   });
 }
 
@@ -972,6 +1219,24 @@ window.__onResume = function () {
   else if (o.kind === 'text') { $('impStatus').innerHTML = ''; runExtract(String(o.text).slice(0, 20000), ''); }
 };
 
+/* ============================ 自动更新 ============================ */
+function uStatus(kind, text) {
+  const el = $('uStatus');
+  if (!el) return;
+  el.innerHTML = text ? '<div class="note ' + kind + '">' + esc(text) + '</div>' : '';
+}
+window.__onUpdate = function (json) {
+  ui.updateBusy = false;
+  let o = null;
+  try { o = JSON.parse(json); } catch (e) { return; }
+  if (!o || !o.ok) {
+    uStatus('err', '下载失败：' + ((o && o.error) || '未知错误'));
+    return;
+  }
+  uStatus('ok', '下载完成（' + Math.round((o.bytes || 0) / 1024) + ' KB），正在调起系统安装器…');
+  try { Native.installUpdate(); } catch (e) { uStatus('err', '调不起安装器：' + e); }
+};
+
 /* ============================ 设置交互 ============================ */
 function bindSettings() {
   $('sBase').onchange = function () { S.ai.baseURL = this.value.trim(); persist(); };
@@ -983,6 +1248,7 @@ function bindSettings() {
   };
   $('sWeeks').onchange = function () { S.totalWeeks = Number(this.value) || 20; persist(); renderWeek(); };
   $('sTermName').onchange = function () { S.semesterName = this.value.trim(); persist(); renderHeader(); };
+  $('sWeekend').onchange = function () { S.showWeekend = this.checked; persist(); renderWeek(); };
   $('sHolidays').onchange = function () {
     S.holidays = this.value;
     HOL = null;                      // 缓存作废，下次 hol() 重新解析
@@ -1001,6 +1267,42 @@ function bindSettings() {
   $('btnHolClear').onclick = function () {
     S.holidays = ''; $('sHolidays').value = '';
     HOL = null; persist(); renderHolStatus(); armReminders(); renderAll();
+  };
+  $('sMakeup').onchange = function () {
+    S.makeup = this.value;
+    MK = null;                       // 解析缓存作废
+    persist(); renderMakeupStatus(); armReminders(); renderAll();
+  };
+  $('btnMkTip').onclick = function () {
+    if (!String(S.makeup || '').trim()) {
+      S.makeup = '2026-10-11 补 周二\n2026-10-18 2026-10-09';
+      MK = null; $('sMakeup').value = S.makeup;
+      persist(); renderMakeupStatus(); armReminders(); renderAll();
+      toast('填了个样例，照着改就行');
+    } else {
+      toast('格式：一行一条，2026-10-11 补 周二（或者直接写被补的日期）');
+    }
+  };
+  $('btnMkClear').onclick = function () {
+    S.makeup = ''; MK = null; $('sMakeup').value = '';
+    persist(); renderMakeupStatus(); armReminders(); renderAll();
+  };
+  $('sUpdateUrl').onchange = function () {
+    S.updateUrl = this.value.trim();
+    persist();
+  };
+  $('btnUpdate').onclick = function () {
+    const url = ($('sUpdateUrl').value || '').trim();
+    if (!/^https?:\/\//i.test(url)) {
+      uStatus('err', '先填一个 http/https 开头的更新包地址');
+      return;
+    }
+    if (ui.updateBusy) { toast('还在下载，稍等'); return; }
+    S.updateUrl = url;
+    persist();
+    ui.updateBusy = true;
+    uStatus('busy', '正在下载更新包…');
+    try { Native.downloadUpdate(url); } catch (e) { ui.updateBusy = false; uStatus('err', '下载失败：' + e); }
   };
   $('sOffsets').onchange = function () {
     S.defaultOffsets = this.value.split(/[,，\s]+/).map(Number).filter(function (n) { return n >= 0; });
@@ -1080,6 +1382,7 @@ function bindSettings() {
 /* ============================ 导入页交互 ============================ */
 function bindImport() {
   $('btnPick').onclick = function () { Native.pickFile(); };
+  $('btnManualAdd').onclick = function () { openCourse(null); };
   $('btnPaste').onclick = function () {
     openSheet('粘贴课表文字',
       '<div class="muted" style="margin-bottom:8px">聊天记录、教务系统复制的表格、随便什么文字都行，粘贴进来我来整理。</div>' +
@@ -1337,6 +1640,68 @@ function bindChat() {
   });
 }
 
+/* ============================ 全局滑动手势 ============================ */
+/** 上滑 → 拉出导入页（今天/周都行）；周视图左右滑 → 切周；
+ *  其他页左右滑 → 切换底部栏目。弹层打开时不响应。
+ *  注意：必须挂在 document 上，touchend 和 touchcancel 都走同一套收尾逻辑。
+ *  周视图表格的横滚容器（.gridwrap）会在真实手指滑动时接管手势发 touchcancel，
+ *  挂在 #p-week 上的元素级监听收不到 touchend，左右划就"失效"了。 */
+function bindSwipeAll() {
+  let sx = 0, sy = 0, t0 = 0, moved = '';
+  document.addEventListener('touchstart', function (e) {
+    if (e.touches.length !== 1) { moved = ''; return; }
+    sx = e.touches[0].clientX;
+    sy = e.touches[0].clientY;
+    t0 = Date.now();
+    moved = '';
+  }, { passive: true });
+  document.addEventListener('touchmove', function (e) {
+    if (e.touches.length !== 1 || moved) return;
+    const dx = e.touches[0].clientX - sx, dy = e.touches[0].clientY - sy;
+    if (Math.abs(dx) > 30 && Math.abs(dx) > Math.abs(dy) * 1.4) moved = 'h';
+    else if (Math.abs(dy) > 30 && Math.abs(dy) > Math.abs(dx) * 1.4) moved = 'v';
+  }, { passive: true });
+  function settle(e) {
+    if (!moved || ui.sheet) { moved = ''; return; }
+    const t = e.changedTouches && e.changedTouches[0];
+    if (!t) { moved = ''; return; }
+    const dx = t.clientX - sx, dy = t.clientY - sy;
+    const dt = Date.now() - t0;
+    moved = '';
+    // 上滑：拉出导入课表界面
+    if (dy < -80 && Math.abs(dy) > Math.abs(dx) * 1.5 && dt < 900) {
+      ui.tab = 'import';
+      renderAll();
+      window.scrollTo(0, 0);
+      ui.tapBlock = Date.now() + 350;
+      return;
+    }
+    // 周视图：左右滑 = 切周（不是切栏目）
+    if (ui.tab === 'week') {
+      if (Math.abs(dx) >= 60 && Math.abs(dx) > Math.abs(dy) * 1.4 && dt < 900) {
+        ui.tapBlock = Date.now() + 350;
+        if (dx > 0) { if (ui.week > 1) { ui.week--; renderWeek(); } }
+        else { ui.week++; renderWeek(); }
+      }
+      return;
+    }
+    // 其他页：左右滑切换底部栏目
+    if (Math.abs(dx) >= 70 && Math.abs(dx) > Math.abs(dy) * 1.5 && dt < 900) {
+      const order = ['today', 'week', 'chat', 'import', 'set'];
+      let i = order.indexOf(ui.tab);
+      if (i < 0) return;
+      i = dx > 0 ? i - 1 : i + 1;
+      if (i < 0 || i >= order.length) return;
+      ui.tab = order[i];
+      renderAll();
+      window.scrollTo(0, 0);
+      ui.tapBlock = Date.now() + 350;
+    }
+  }
+  document.addEventListener('touchend', settle, { passive: true });
+  document.addEventListener('touchcancel', settle, { passive: true });
+}
+
 /* ============================ 启动 ============================ */
 function main() {
   boot();
@@ -1357,13 +1722,26 @@ function main() {
   $('wNext').onclick = function () { ui.week++; renderWeek(); };
   $('wNow').onclick = function () { const w = nowWeek(); ui.week = (w && w >= 1) ? w : 1; renderWeek(); };
   $('wAdd').onclick = function () { openCourse(null); };
+  bindSwipeAll();
 
   $('grid').addEventListener('click', function (e) {
+    if (Date.now() < (ui.tapBlock || 0)) return;
+    let el = e.target;
+    while (el && el !== this && !el.getAttribute('data-oid') && !el.getAttribute('data-day')) el = el.parentNode;
+    if (!el || el === this) return;
+    if (el.getAttribute('data-oid')) { openCourse(el.getAttribute('data-oid')); return; }
+    // 点周视图的空格子：直接新建，并把这一天/这一节预填进去（默认占两节）
+    const p = Number(el.getAttribute('data-p'));
+    openCourse(null, { day: Number(el.getAttribute('data-day')), from: p, to: p + 1 });
+  });
+  $('todayList').addEventListener('click', function (e) {
+    if (Date.now() < (ui.tapBlock || 0)) return;
     let el = e.target;
     while (el && el !== this && !el.getAttribute('data-oid')) el = el.parentNode;
     if (el && el !== this) openCourse(el.getAttribute('data-oid'));
   });
-  $('todayList').addEventListener('click', function (e) {
+  $('upcomingList').addEventListener('click', function (e) {
+    if (Date.now() < (ui.tapBlock || 0)) return;
     let el = e.target;
     while (el && el !== this && !el.getAttribute('data-oid')) el = el.parentNode;
     if (el && el !== this) openCourse(el.getAttribute('data-oid'));
