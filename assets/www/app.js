@@ -1414,14 +1414,89 @@ function bindImport() {
 }
 
 /* ============================ 对话 ============================ */
+/* ===== op 注册表 =====
+ * 一个 op 的全部知识只写在这张表里，三处从它长出来：
+ *   ① 给模型的说明与 JSON 例子  ② 给人看的确认文案  ③ 真正执行
+ * 加第 4 个 op = 往这里加一条，别的文件不用动（本文件也不动别的地方）。
+ * 5 个 op 的规模不值得上宏，一张表足够——实测：表驱动的横切成本是 1 处。 */
+const OPS = {
+  del: {
+    example: { op: 'del', match: '课程名关键字' },
+    text: function (o) {
+      return '删掉「' + (o.match || '?') + '」';
+    },
+    run: function (o) {
+      const hit = matchCourses(o.match);
+      if (!hit.length) return { n: 0, log: '没找到「' + o.match + '」' };
+      courses = courses.filter(function (c) { return hit.indexOf(c) < 0; });
+      return { n: hit.length, log: '删掉 ' + hit.length + ' 条「' + o.match + '」' };
+    }
+  },
+  edit: {
+    example: { op: 'edit', match: '关键字', set: { day: 4, periodFrom: 5, periodTo: 6 } },
+    text: function (o) {
+      const s = o.set || {}, p = [];
+      if (s.day) p.push(DAYS[Number(s.day)] || ('周' + s.day));
+      if (s.periodFrom) p.push('第' + s.periodFrom + '-' + (s.periodTo || s.periodFrom) + '节');
+      if (s.location) p.push(String(s.location));
+      if (s.teacher) p.push(String(s.teacher));
+      if (s.weeks) p.push('周次改过');
+      return '把「' + (o.match || '?') + '」改成 ' + (p.join(' ') || '（没写具体值）');
+    },
+    run: function (o) {
+      const hit = matchCourses(o.match);
+      if (!hit.length) return { n: 0, log: '没找到「' + o.match + '」' };
+      const set = o.set || {};
+      let n = 0;
+      hit.forEach(function (c) {
+        ['teacher', 'location', 'note'].forEach(function (k) { if (set[k] !== undefined) c[k] = String(set[k]); });
+        ['day', 'periodFrom', 'periodTo'].forEach(function (k) {
+          if (set[k] !== undefined && Number(set[k])) c[k] = Number(set[k]);
+        });
+        if (set.weeks) c.weeks = set.weeks;
+        n++;
+      });
+      return { n: n, log: '改了 ' + hit.length + ' 条「' + o.match + '」' };
+    }
+  },
+  add: {
+    example: {
+      op: 'add',
+      course: {
+        name: '', teacher: '', location: '', day: 1, periodFrom: 1, periodTo: 2,
+        weeks: { type: 'range', from: 1, to: 16 }
+      }
+    },
+    text: function (o) {
+      return '加「' + ((o.course && o.course.name) || '?') + '」';
+    },
+    run: function (o) {
+      const c = o.course || {};
+      if (!c.name) return { n: 0, log: '有一条 add 没写课程名' };
+      courses.push({
+        id: 'c' + Date.now().toString(36) + courses.length + Math.floor(Math.random() * 1000),
+        name: String(c.name), teacher: String(c.teacher || ''), location: String(c.location || ''),
+        day: Math.min(7, Math.max(1, Number(c.day) || 1)),
+        periodFrom: Math.max(1, Number(c.periodFrom) || 1),
+        periodTo: Math.max(1, Number(c.periodTo || c.periodFrom) || 1),
+        weeks: (c.weeks && c.weeks.type) ? c.weeks : { type: 'range', from: 1, to: S.totalWeeks || 16, list: [] },
+        remindOffsets: [], remindEnabled: true, source: 'chat'
+      });
+      return { n: 1, log: '加了「' + c.name + '」' };
+    }
+  }
+};
+const OP_NAMES = Object.keys(OPS);
+const OPS_EXAMPLE = '{"ops":[' + OP_NAMES.map(function (k) { return JSON.stringify(OPS[k].example); }).join(',') + ']}';
+
 const CHAT_SYS = [
   '你是「课表」App 里的助手。用户会连同当前课表一起发消息给你，你可以据此回答，也可以帮他改课表。',
   '回答要求：简体中文，直接给结论，别客套、别复述用户的话。看不清或没有的信息就说不知道，不要编。',
   '如果用户是在要求改课表，就在回答的最后附一个 JSON 代码块，格式：',
   '```json',
-  '{"ops":[{"op":"del","match":"课程名关键字"},{"op":"edit","match":"关键字","set":{"day":4,"periodFrom":5,"periodTo":6}},{"op":"add","course":{"name":"","teacher":"","location":"","day":1,"periodFrom":1,"periodTo":2,"weeks":{"type":"range","from":1,"to":16}}}]}',
+  OPS_EXAMPLE,
   '```',
-  'op 只有 del / edit / add 三种；match 用课程名里的关键字，能唯一定位就行。',
+  'op 只有 ' + OP_NAMES.join(' / ') + ' 三种；match 用课程名里的关键字，能唯一定位就行。',
   '不改课表时，绝对不要输出任何代码块。'
 ].join('\n');
 
@@ -1452,18 +1527,8 @@ function chatCtx() {
 function opsText(ops) {
   return (ops || []).map(function (o) {
     if (!o) return '';
-    if (o.op === 'del') return '删掉「' + (o.match || '?') + '」';
-    if (o.op === 'add') return '加「' + ((o.course && o.course.name) || '?') + '」';
-    if (o.op === 'edit') {
-      const s = o.set || {}, p = [];
-      if (s.day) p.push(DAYS[Number(s.day)] || ('周' + s.day));
-      if (s.periodFrom) p.push('第' + s.periodFrom + '-' + (s.periodTo || s.periodFrom) + '节');
-      if (s.location) p.push(String(s.location));
-      if (s.teacher) p.push(String(s.teacher));
-      if (s.weeks) p.push('周次改过');
-      return '把「' + (o.match || '?') + '」改成 ' + (p.join(' ') || '（没写具体值）');
-    }
-    return String(o.op || '?');
+    const h = OPS[o.op];
+    return h ? h.text(o) : String(o.op || '?');
   }).filter(Boolean).join('；');
 }
 /** 把回复里的 ```json {"ops":[...]}``` 抽出来，正文与改动分开 */
@@ -1492,38 +1557,11 @@ function applyOps(ops) {
   let n = 0;
   (ops || []).forEach(function (o) {
     if (!o || !o.op) return;
-    if (o.op === 'del') {
-      const hit = matchCourses(o.match);
-      if (!hit.length) { log.push('没找到「' + o.match + '」'); return; }
-      courses = courses.filter(function (c) { return hit.indexOf(c) < 0; });
-      n += hit.length; log.push('删掉 ' + hit.length + ' 条「' + o.match + '」');
-    } else if (o.op === 'edit') {
-      const hit = matchCourses(o.match);
-      if (!hit.length) { log.push('没找到「' + o.match + '」'); return; }
-      const set = o.set || {};
-      hit.forEach(function (c) {
-        ['teacher', 'location', 'note'].forEach(function (k) { if (set[k] !== undefined) c[k] = String(set[k]); });
-        ['day', 'periodFrom', 'periodTo'].forEach(function (k) {
-          if (set[k] !== undefined && Number(set[k])) c[k] = Number(set[k]);
-        });
-        if (set.weeks) c.weeks = set.weeks;
-        n++;
-      });
-      log.push('改了 ' + hit.length + ' 条「' + o.match + '」');
-    } else if (o.op === 'add') {
-      const c = o.course || {};
-      if (!c.name) { log.push('有一条 add 没写课程名'); return; }
-      courses.push({
-        id: 'c' + Date.now().toString(36) + n + Math.floor(Math.random() * 1000),
-        name: String(c.name), teacher: String(c.teacher || ''), location: String(c.location || ''),
-        day: Math.min(7, Math.max(1, Number(c.day) || 1)),
-        periodFrom: Math.max(1, Number(c.periodFrom) || 1),
-        periodTo: Math.max(1, Number(c.periodTo || c.periodFrom) || 1),
-        weeks: (c.weeks && c.weeks.type) ? c.weeks : { type: 'range', from: 1, to: S.totalWeeks || 16, list: [] },
-        remindOffsets: [], remindEnabled: true, source: 'chat'
-      });
-      n++; log.push('加了「' + c.name + '」');
-    }
+    const h = OPS[o.op];
+    if (!h) return;
+    const r = h.run(o);
+    n += r.n;
+    if (r.log) log.push(r.log);
   });
   persist();
   const armed = armReminders();
@@ -1641,12 +1679,11 @@ function bindChat() {
   });
 }
 
-/* ============================ 全局滑动手势 ============================ */
-/** 上滑 → 拉出导入页（今天/周都行）；周视图左右滑 → 切周；
- *  其他页左右滑 → 切换底部栏目。弹层打开时不响应。
- *  注意：必须挂在 document 上，touchend 和 touchcancel 都走同一套收尾逻辑。
- *  周视图表格的横滚容器（.gridwrap）会在真实手指滑动时接管手势发 touchcancel，
- *  挂在 #p-week 上的元素级监听收不到 touchend，左右划就"失效"了。 */
+/* ============================ 上滑手势 ============================ */
+/** 只保留一种手势：上滑 → 拉出导入页（今天/周都行）。弹层打开时不响应。
+ *  左右划（周视图切周、其他页切栏目）已整段移除，不做"半留半禁"：
+ *  切周改用 wPrev / wNext / wNow 按钮，切栏目改用底部导航。
+ *  注意：必须挂在 document 上，touchend 和 touchcancel 都走同一套收尾逻辑。 */
 function bindSwipeAll() {
   let sx = 0, sy = 0, t0 = 0, moved = '';
   document.addEventListener('touchstart', function (e) {
@@ -1659,8 +1696,7 @@ function bindSwipeAll() {
   document.addEventListener('touchmove', function (e) {
     if (e.touches.length !== 1 || moved) return;
     const dx = e.touches[0].clientX - sx, dy = e.touches[0].clientY - sy;
-    if (Math.abs(dx) > 30 && Math.abs(dx) > Math.abs(dy) * 1.4) moved = 'h';
-    else if (Math.abs(dy) > 30 && Math.abs(dy) > Math.abs(dx) * 1.4) moved = 'v';
+    if (Math.abs(dy) > 30 && Math.abs(dy) > Math.abs(dx) * 1.4) moved = 'v';
   }, { passive: true });
   function settle(e) {
     if (!moved || ui.sheet) { moved = ''; return; }
@@ -1672,28 +1708,6 @@ function bindSwipeAll() {
     // 上滑：拉出导入课表界面
     if (dy < -80 && Math.abs(dy) > Math.abs(dx) * 1.5 && dt < 900) {
       ui.tab = 'import';
-      renderAll();
-      window.scrollTo(0, 0);
-      ui.tapBlock = Date.now() + 350;
-      return;
-    }
-    // 周视图：左右滑 = 切周（不是切栏目）
-    if (ui.tab === 'week') {
-      if (Math.abs(dx) >= 60 && Math.abs(dx) > Math.abs(dy) * 1.4 && dt < 900) {
-        ui.tapBlock = Date.now() + 350;
-        if (dx > 0) { if (ui.week > 1) { ui.week--; renderWeek(); } }
-        else { ui.week++; renderWeek(); }
-      }
-      return;
-    }
-    // 其他页：左右滑切换底部栏目
-    if (Math.abs(dx) >= 70 && Math.abs(dx) > Math.abs(dy) * 1.5 && dt < 900) {
-      const order = ['today', 'week', 'chat', 'import', 'set'];
-      let i = order.indexOf(ui.tab);
-      if (i < 0) return;
-      i = dx > 0 ? i - 1 : i + 1;
-      if (i < 0 || i >= order.length) return;
-      ui.tab = order[i];
       renderAll();
       window.scrollTo(0, 0);
       ui.tapBlock = Date.now() + 350;
